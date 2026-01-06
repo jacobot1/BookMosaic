@@ -4,51 +4,25 @@
 <meta charset="UTF-8">
 <title>BookMosaic</title>
 <style>
-body {
-  font-family: system-ui, sans-serif;
-  background: #111;
-  color: #eee;
-  margin: 0;
-  padding: 1rem;
-}
+body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 1rem; }
 h1 { margin-bottom: .25rem; }
-fieldset {
-  border: 1px solid #333;
-  padding: 1rem;
-  margin-bottom: 1rem;
-}
-label {
-  display: flex;
-  justify-content: space-between;
-  margin: .3rem 0;
-  gap: 1rem;
-}
-input, button {
-  background: #222;
-  color: #eee;
-  border: 1px solid #444;
-  padding: .3rem .5rem;
-}
-button {
-  cursor: pointer;
-  font-weight: bold;
-}
-progress {
-  width: 100%;
+fieldset { border: 1px solid #333; padding: 1rem; margin-bottom: 1rem; }
+label { display: flex; justify-content: space-between; margin: .3rem 0; gap: 1rem; }
+input, button { background: #222; color: #eee; border: 1px solid #444; padding: .3rem .5rem; }
+button { cursor: pointer; font-weight: bold; }
+progress { width: 100%; margin-top: .5rem; }
+img { display:block; margin-top:1rem; max-width:100%; border:1px solid #333; }
+
+#status {
   margin-top: .5rem;
-}
-canvas {
-  display: block;
-  max-width: 100%;
-  border: 1px solid #333;
-  margin-top: 1rem;
+  font-style: italic;
+  color: #aaa;
 }
 </style>
 </head>
 
 <body>
 <h1>📘 BookMosaic</h1>
-<p>Client-side mosaic generator built for tile images that look the same, such as pages in a book. Tile images are RESIZED rather than color-corrected.</p>
 
 <fieldset>
   <legend>Images</legend>
@@ -60,63 +34,187 @@ canvas {
   <legend>Layout</legend>
   <label>Grid (WxH, autoxH, Wxauto) <input id="grid" value="20xauto"></label>
   <label>Base tile resolution (px) <input id="cellH" type="number" value="200"></label>
-  <label>Steps <input id="steps" type="number" value="4"></label>
+  <label>Subdivision steps <input id="steps" type="number" value="4"></label>
   <label>Min tile size (px) <input id="minTile" type="number" value="8"></label>
   <label>Border width (px) <input id="border" type="number" value="0"></label>
 </fieldset>
 
 <fieldset>
   <legend>Options</legend>
-  <label><span>Exponential subdivision steps</span><input type="checkbox" id="expo"></label>
+  <label><span>Exponential subdivision</span><input type="checkbox" id="expo"></label>
   <label><span>Invert brightness</span><input type="checkbox" id="invert"></label>
 </fieldset>
 
 <button id="run">Generate Mosaic</button>
+<button id="download" disabled>Download PNG</button>
+
+<div id="status">Idle</div>
 <progress id="progress" value="0" max="1"></progress>
+<img id="preview" />
 
-<canvas id="out"></canvas>
-
+<script src="https://cdn.jsdelivr.net/npm/jimp/browser/lib/jimp.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 
+// ----------------- helpers -----------------
 function parseGrid(s) {
-  const [w, h] = s.toLowerCase().split("x");
-  return [
-    w === "auto" ? null : parseInt(w),
-    h === "auto" ? null : parseInt(h)
-  ];
+  const [w,h] = s.toLowerCase().split("x");
+  return [w==="auto"?null:parseInt(w), h==="auto"?null:parseInt(h)];
 }
-
-function pickSubdivision(bright, steps, exponential) {
+function pickSubdivision(bright, steps, exponential){
   let idx = Math.floor((1 - bright) * steps);
   idx = Math.max(0, Math.min(steps - 1, idx));
   return exponential ? (1 << idx) : (idx + 1);
 }
-
-function estimateSizeMB(w, h) {
-  return (w * h * 3 / 10) / (1024 * 1024);
-}
-
-function loadImage(file) {
-  return new Promise(res => {
-    const img = new Image();
-    img.onload = () => res(img);
-    img.src = URL.createObjectURL(file);
+async function fileToArrayBuffer(file){
+  return new Promise(res=>{
+    const reader = new FileReader();
+    reader.onload = e=>res(e.target.result);
+    reader.readAsArrayBuffer(file);
   });
 }
+async function getImageSize(file){
+  const bitmap = await createImageBitmap(file);
+  const w = bitmap.width;
+  const h = bitmap.height;
+  bitmap.close();
+  return {w, h};
+}
 
-$("run").onclick = async () => {
+// ----------------- Web Worker -----------------
+function createWorker() {
+  const blob = new Blob([`
+    self.importScripts('https://cdn.jsdelivr.net/npm/jimp/browser/lib/jimp.min.js');
+
+    function pickSubdivision(bright, steps, exponential){
+      let idx = Math.floor((1 - bright) * steps);
+      idx = Math.max(0, Math.min(steps - 1, idx));
+      return exponential ? (1 << idx) : (idx + 1);
+    }
+
+    async function jimpResizeToCanvas(jimpImg, w, h) {
+      const resized = jimpImg.clone().resize(w, h, Jimp.RESIZE_LANCZOS);
+      const { data, width, height } = resized.bitmap;
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext('2d');
+      const imgData = new ImageData(
+        new Uint8ClampedArray(data),
+        width,
+        height
+      );
+      ctx.putImageData(imgData, 0, 0);
+      return canvas;
+    }
+
+    self.onmessage = async e => {
+      self.postMessage({ phase: "Initializing" });
+
+      const { targetBuffer, tileBuffers, params } = e.data;
+      const {
+        gridW, gridH, cellW, cellH,
+        steps, expo, minTile, border, invert
+      } = params;
+
+      /* ---------------- Load images ---------------- */
+      const targetJimp = await Jimp.read(targetBuffer);
+      const tileJimps  = await Promise.all(tileBuffers.map(b => Jimp.read(b)));
+
+      /* ---------------- Output canvas ---------------- */
+      const out = new OffscreenCanvas(gridW * cellW, gridH * cellH);
+      const outCtx = out.getContext('2d');
+
+      /* ---------------- Target brightness map ---------------- */
+      const tSmall = new OffscreenCanvas(gridW, gridH);
+      const tCtx = tSmall.getContext('2d');
+
+      const tResized = await jimpResizeToCanvas(targetJimp, gridW, gridH);
+      tCtx.drawImage(tResized, 0, 0);
+
+      const tData = tCtx.getImageData(0, 0, gridW, gridH).data;
+
+      /* ---------------- Tile selection ---------------- */
+      const resizeCache = new Map();
+      let unused = tileJimps.slice().sort(() => Math.random() - 0.5);
+      const getTile = () =>
+        unused.length ? unused.pop() : tileJimps[Math.random() * tileJimps.length | 0];
+
+      const HALF = Math.floor(border / 2);
+
+      self.postMessage({ phase: "Running" });
+
+      /* ---------------- Main mosaic loop ---------------- */
+      for (let gy = 0; gy < gridH; gy++) {
+        let baseY = gy * cellH + HALF - (gy === 0 ? HALF : 0);
+
+        for (let gx = 0; gx < gridW; gx++) {
+          let baseX = gx * cellW + HALF - (gx === 0 ? HALF : 0);
+
+          let bright = tData[(gy * gridW + gx) * 4] / 255;
+          if (invert) bright = 1 - bright;
+
+          const subdiv = pickSubdivision(bright, steps, expo);
+
+          const usableW = cellW - border;
+          const usableH = cellH - border;
+          const drawableW = usableW - (subdiv - 1) * border;
+          const drawableH = usableH - (subdiv - 1) * border;
+          if (drawableW <= 0 || drawableH <= 0) continue;
+
+          const baseW = Math.floor(drawableW / subdiv);
+          const baseH = Math.floor(drawableH / subdiv);
+          if (baseW < minTile || baseH < minTile) continue;
+
+          const extraW = drawableW - baseW * subdiv;
+          const extraH = drawableH - baseH * subdiv;
+
+          const widths  = Array.from({ length: subdiv }, (_, i) => baseW + (i < extraW));
+          const heights = Array.from({ length: subdiv }, (_, i) => baseH + (i < extraH));
+
+          let y = baseY;
+          for (let sy = 0; sy < subdiv; sy++) {
+            let x = baseX;
+            for (let sx = 0; sx < subdiv; sx++) {
+              const w = widths[sx];
+              const h = heights[sy];
+
+              const tile = getTile();
+              const key = tile._id + "|" + w + "x" + h;
+
+              if (!resizeCache.has(key)) {
+                resizeCache.set(key, await jimpResizeToCanvas(tile, w, h));
+              }
+
+              outCtx.drawImage(resizeCache.get(key), x, y);
+              x += w + border;
+            }
+            y += heights[sy] + border;
+          }
+        }
+
+        self.postMessage({ progress: (gy + 1) / gridH });
+      }
+
+      self.postMessage({ phase: "Finishing" });
+
+      const blob = await out.convertToBlob({ type: "image/png" });
+      self.postMessage({ done: true, blob });
+    };
+  `], { type: 'application/javascript' });
+
+  return new Worker(URL.createObjectURL(blob));
+}
+
+// ----------------- Main -----------------
+$("run").onclick = async ()=>{
   const targetFile = $("target").files[0];
   const tileFiles = [...$("tiles").files];
-  if (!targetFile || tileFiles.length === 0) {
-    alert("Select a target image and tile images.");
-    return;
-  }
+  if(!targetFile || tileFiles.length===0) return alert("Select target and tile images.");
 
-  const targetImg = await loadImage(targetFile);
-  const tiles = await Promise.all(tileFiles.map(loadImage));
+  $("download").disabled = true;
+  $("progress").value = 0;
+  $("status").textContent = "Initializing";
 
-  const [gridW0, gridH0] = parseGrid($("grid").value);
+  const [gridW0,gridH0] = parseGrid($("grid").value);
   const cellH = +$("cellH").value;
   const steps = +$("steps").value;
   const minTile = +$("minTile").value;
@@ -124,105 +222,54 @@ $("run").onclick = async () => {
   const expo = $("expo").checked;
   const invert = $("invert").checked;
 
-  const tAspect = targetImg.width / targetImg.height;
-  const iAspect = tiles[0].width / tiles[0].height;
+  const targetSize = await getImageSize(targetFile);
+  const tileSize   = await getImageSize(tileFiles[0]);
 
-  let gridW = gridW0, gridH = gridH0;
-  if (gridW == null && gridH == null) {
-    alert("At least one grid dimension must be specified.");
-    return;
-  }
-  if (gridW == null) gridW = Math.round(gridH * (tAspect / iAspect));
-  if (gridH == null) gridH = Math.round(gridW * (iAspect / tAspect));
+  const tAspect = targetSize.w / targetSize.h;
+  const iAspect = tileSize.w / tileSize.h;
+
+  let gridW=gridW0, gridH=gridH0;
+  if(gridW==null && gridH==null) return alert("At least one grid dimension must be specified");
+  if(gridW==null) gridW = Math.round(gridH * (tAspect / iAspect));
+  if(gridH==null) gridH = Math.round(gridW * (iAspect / tAspect));
 
   const cellW = Math.floor(cellH * iAspect);
   const outW = gridW * cellW;
   const outH = gridH * cellH;
 
-  const est = estimateSizeMB(outW, outH);
-  if (!confirm(`Estimated output size ~${est.toFixed(1)} MB. Continue?`)) return;
+  if(!confirm(`Mosaic dimensions ${outW} x ${outH} px. Continue?`)) return;
 
-  const canvas = $("out");
-  canvas.width = outW;
-  canvas.height = outH;
-  const ctx = canvas.getContext("2d");
-
-  // Downsample target to grid (grayscale)
-  const tCanvas = new OffscreenCanvas(gridW, gridH);
-  const tctx = tCanvas.getContext("2d");
-  tctx.drawImage(targetImg, 0, 0, gridW, gridH);
-  const tdata = tctx.getImageData(0, 0, gridW, gridH).data;
-
-  const resizeCache = new Map();
-  let unused = tiles.slice().sort(() => Math.random() - 0.5);
-  const getTile = () => unused.length ? unused.pop() : tiles[Math.random() * tiles.length | 0];
-
-  let done = 0;
-  const total = gridW * gridH;
-  const HALF = Math.floor(border / 2);
-
-  for (let gy = 0; gy < gridH; gy++) {
-    let baseY = gy * cellH + HALF;
-    if (gy === 0) baseY -= HALF;
-
-    for (let gx = 0; gx < gridW; gx++) {
-      let baseX = gx * cellW + HALF;
-      if (gx === 0) baseX -= HALF;
-
-      const idx = (gy * gridW + gx) * 4;
-      let bright = tdata[idx] / 255;
-      if (invert) bright = 1 - bright;
-
-      const desired = pickSubdivision(bright, steps, expo);
-      const subdiv = desired;
-
-      const usableW = cellW - border;
-      const usableH = cellH - border;
-
-      const drawableW = usableW - (subdiv - 1) * border;
-      const drawableH = usableH - (subdiv - 1) * border;
-      if (drawableW <= 0 || drawableH <= 0) continue;
-
-      const baseW = Math.floor(drawableW / subdiv);
-      const baseH = Math.floor(drawableH / subdiv);
-      if (baseW < minTile || baseH < minTile) continue;
-
-      // 🔧 CRITICAL FIX: remainder distribution (Python-exact)
-      const extraW = drawableW - baseW * subdiv;
-      const extraH = drawableH - baseH * subdiv;
-
-      const widths  = Array.from({ length: subdiv }, (_, i) => baseW + (i < extraW ? 1 : 0));
-      const heights = Array.from({ length: subdiv }, (_, i) => baseH + (i < extraH ? 1 : 0));
-
-      let y = baseY;
-      for (let sy = 0; sy < subdiv; sy++) {
-        let x = baseX;
-        for (let sx = 0; sx < subdiv; sx++) {
-          const w = widths[sx];
-          const h = heights[sy];
-
-          const tile = getTile();
-          const key = tile.src + "|" + w + "x" + h;
-          if (!resizeCache.has(key)) {
-            const c = new OffscreenCanvas(w, h);
-            c.getContext("2d").drawImage(tile, 0, 0, w, h);
-            resizeCache.set(key, c);
-          }
-          ctx.drawImage(resizeCache.get(key), x, y);
-          x += w + border;
-        }
-        y += heights[sy] + border;
-      }
-
-      done++;
-      if (done % 25 === 0) {
-        $("progress").value = done / total;
-        await new Promise(r => setTimeout(r));
-      }
+  const worker = createWorker();
+  worker.onmessage = e=>{
+    if(e.data.phase){
+      $("status").textContent = e.data.phase;
     }
-  }
 
-  $("progress").value = 1;
+    if(e.data.progress !== undefined){
+      $("progress").value = e.data.progress;
+    }
+
+    if(e.data.done){
+      const url = URL.createObjectURL(e.data.blob);
+
+      $("preview").src = url;
+      $("download").disabled = false;
+      $("status").textContent = "Done";
+
+      $("download").onclick = ()=>{
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "mosaic.png";
+        a.click();
+      };
+    }
+  };
+
+  worker.postMessage({
+    targetBuffer: await fileToArrayBuffer(targetFile),
+    tileBuffers: await Promise.all(tileFiles.map(fileToArrayBuffer)),
+    params:{gridW,gridH,cellW,cellH,steps,expo,minTile,border,invert}
+  });
 };
 </script>
 </body>
