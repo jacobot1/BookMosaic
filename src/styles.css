@@ -1,0 +1,35 @@
+body { font-family: system-ui, sans-serif; background: #111; color: #eee;}
+h1 { margin-bottom: .25rem; }
+fieldset { border: 1px solid #333; padding: 1rem; margin-bottom: 1rem; }
+label { display: flex; justify-content: space-between; margin: .3rem 0; gap: 1rem; }
+input, button { background: #222; color: #eee; border: 1px solid #444; padding: .3rem .5rem; }
+button { cursor: pointer; font-weight: bold; }
+progress { width: 100%; margin-top: .5rem; }
+img { display:block; margin-top:1rem; max-width:100%; border:1px solid #333; }
+
+.header-with-icon {
+  display: flex;          /* horizontal layout */
+  align-items: center;    /* vertical center of all children */
+  gap: 0.5rem;            /* space between icon and text */
+  margin-left: 0.2rem;
+}
+
+.header-icon {
+  display: block;         /* remove baseline offset */
+  height: 2em;            /* icon height relative to text */
+  width: auto;
+  border: none;
+}
+
+.header-text {
+  display: flex;          /* make text a flex container itself */
+  align-items: center;    /* vertically center the text content inside */
+  line-height: 1;         /* avoid extra spacing */
+  margin-top: 0.4em;
+}
+
+#status {
+  margin-top: .5rem;
+  font-style: italic;
+  color: #aaa;
+}

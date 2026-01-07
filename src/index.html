@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BookMosaic</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+<h1 class="header-with-icon">
+  <img src="./assets/logo.svg" alt="BookMosaic Icon" class="header-icon">
+  <span class="header-text">BookMosaic</span>
+</h1>
+
+<fieldset>
+  <legend>Images</legend>
+  <label>Target image <input type="file" id="target" accept="image/*"></label>
+  <label>Tile images <input type="file" id="tiles" accept="image/*" multiple></label>
+</fieldset>
+
+<fieldset>
+  <legend>Layout</legend>
+  <label>Grid (WxH, autoxH, Wxauto) <input id="grid" value="20xauto"></label>
+  <label>Base tile resolution (px) <input id="cellH" type="number" value="200"></label>
+  <label>Subdivision steps <input id="steps" type="number" value="4"></label>
+  <label>Min tile size (px) <input id="minTile" type="number" value="8"></label>
+  <label>Border width (px) <input id="border" type="number" value="0"></label>
+</fieldset>
+
+<fieldset>
+  <legend>Options</legend>
+  <label><span>Exponential subdivision</span><input type="checkbox" id="expo"></label>
+  <label><span>Invert brightness</span><input type="checkbox" id="invert"></label>
+</fieldset>
+
+<button id="run">Generate Mosaic</button>
+<button id="download" disabled>Save PNG</button>
+
+<div id="status">Idle</div>
+<progress id="progress" value="0" max="1"></progress>
+<img id="preview" />
+
+<script src="./jimp.min.js"></script>
+<script src="./main.js"></script>
+
+</body>
+</html>
